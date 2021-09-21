@@ -1,0 +1,132 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Lambda function with cfn-response.
+Resources:
+  ExampleLambdaFunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Runtime: python3.8
+      Role: rolename
+      Handler: index.lambda_handler
+      FunctionName: "cfnfunction"
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import time
+          def lambda_handler(event, context):
+              print("welcome to cloud formation")
+              print(event)
+              s3=boto3.client('s3')
+              Client= boto3.client('glue')
+              client1 = boto3.client('logs',region_name='us-east-2')
+              if event:
+                  s3_records=event["Records"][0]
+                  print(s3_records)
+                  try:
+                      response = Client.start_crawler(Name='ctg-fis-cloudformation')
+                      time.sleep(30)
+                  except Exception as ex:
+                      print(ex)
+                  else: 
+                      print("crawler is running")
+                      glue_crawler = Client.get_crawler(Name='ctg-fis-cloudformation')
+                      while( (glue_crawler['Crawler']['State'] == 'RUNNING') | (glue_crawler['Crawler']['State'] == 'STOPPING') ):
+                          print("please wait few seconds  for data crawl")
+                          time.sleep(30)
+                          glue_crawler = Client.get_crawler(Name='ctg-fis-cloudformation')
+                      if(glue_crawler['Crawler']['LastCrawl']['Status'] == 'SUCCEEDED'):
+                          print("successfully completed")
+                          print("Running glue job!!")
+                          try:
+                              print("waiting to finsh job")
+                              myNewJobRun = Client.start_job_run(JobName='ctg-fis-cfjob')
+                              time.sleep(30)
+                              print("RunID for ctg-fis-cfjob is: ",myNewJobRun['JobRunId'])
+                              run="myNewJobRun['JobRunId']"
+                              print("sending logs to logstream...")
+
+                          except Exception as ex:
+                              print(ex)
+                              
+                          else: 
+                              gluename="FIS-Razik"
+                              response_create_logs = client1.create_log_stream(logGroupName='/aws-glue/jobs/' + gluename,logStreamName=myNewJobRun['JobRunId'])
+                              print("logstream " + myNewJobRun['JobRunId'] + "is created")
+                              errortaking = Client.get_job_run(JobName='ctg-fis-cfjob',RunId='jr_c0b57169ff6987f7cc9866e21591faa21ebd2e54eb45d2896e185752a325da0b')
+                              print("ERROR IS:",errortaking)
+                              try:
+                                  err_log = errortaking['JobRun']['ErrorMessage']
+                                  response = client1.put_log_events(logGroupName='/aws-glue/jobs/' + gluename ,logStreamName=myNewJobRun['JobRunId'],
+                                  logEvents=[
+                                          {
+                                             'timestamp': int(round(time.time() * 1000)),
+                                             'message': err_log
+                    
+                                          }])
+                              except Exception as ex:
+                                  print(ex)
+                              else:
+                                  print("job sucessfully completed")
+                      
+                      else: 
+                          print("something went wrong getting crawler status")
+
+              else:
+                  print("something went wrong getting events")
+      
+  
+      Description: Invoke a function during stack creation.
+      Timeout: 900
+  Mys3bucket: 
+    Type: 'AWS::S3::Bucket'
+    Properties: 
+      BucketName: ctg-cf-source
+      AccessControl: Private
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: s3:ObjectCreated:Put
+            Function: !GetAtt [ ExampleLambdaFunction, Arn]
+
+  ExampleInvokePermission:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      FunctionName:
+        Fn::GetAtt:
+          - ExampleLambdaFunction
+          - Arn
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceArn:
+        Fn::Sub: arn:aws:s3:::ctg-cf-source
+  
+  Crawlersetup:
+    Type: AWS::Glue::Crawler
+    Properties: 
+      DatabaseName: cloudtemplate-fis
+      Description: creating crwler
+      Name: ctg-fis-cloudformation
+      Role: rolename
+      Targets: 
+        S3Targets:
+          - Path: !Sub s3://ctg-cf-source
+
+
+  Gluejobcreation:
+    Type: AWS::Glue::Job
+    Properties: 
+      Command: 
+        Name: glueetl
+        ScriptLocation: 's3://classifier-razik/jobscript/script4.py'
+      Name: ctg-fis-cfjob
+      Role: rolename
+      DefaultArguments:
+        "--enable-continuous-cloudwatch-log": "true"
+        "--enable-continuous-log-filter": "true"
+        '--TempDir': 's3://classifier-razik/jobscript/'
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 2
+      GlueVersion: 2.0
+
+
+  
